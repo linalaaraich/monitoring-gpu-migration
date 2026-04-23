@@ -228,8 +228,10 @@ services:
   # Not exposed to host — only reachable from triage via the compose network.
   # ---------------------------------------------------------------------------
   prometheus-mcp:
-    image: "cires/mcp-prometheus:${IMAGE_TAG}"
+    image: "${MCP_PROMETHEUS_IMAGE:-ghcr.io/linalaaraich/mcp-prometheus:${MCP_TAG:-main}}"
     container_name: ai-mcp-prometheus
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
     hostname: prometheus-mcp
     networks: [ai-stack]
     environment:
@@ -251,8 +253,10 @@ services:
   # MCP: Loki. Stateless.
   # ---------------------------------------------------------------------------
   loki-mcp:
-    image: "cires/mcp-loki:${IMAGE_TAG}"
+    image: "${MCP_LOKI_IMAGE:-ghcr.io/linalaaraich/mcp-loki:${MCP_TAG:-main}}"
     container_name: ai-mcp-loki
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
     hostname: loki-mcp
     networks: [ai-stack]
     environment:
@@ -274,8 +278,10 @@ services:
   # MCP: Jaeger. Stateless.
   # ---------------------------------------------------------------------------
   jaeger-mcp:
-    image: "cires/mcp-jaeger:${IMAGE_TAG}"
+    image: "${MCP_JAEGER_IMAGE:-ghcr.io/linalaaraich/mcp-jaeger:${MCP_TAG:-main}}"
     container_name: ai-mcp-jaeger
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
     hostname: jaeger-mcp
     networks: [ai-stack]
     environment:
@@ -300,8 +306,10 @@ services:
   # but noisy).
   # ---------------------------------------------------------------------------
   drain3-mcp:
-    image: "cires/mcp-drain3:${IMAGE_TAG}"
+    image: "${MCP_DRAIN3_IMAGE:-ghcr.io/linalaaraich/mcp-drain3:${MCP_TAG:-main}}"
     container_name: ai-mcp-drain3
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
     hostname: drain3-mcp
     networks: [ai-stack]
     depends_on:
@@ -330,8 +338,10 @@ services:
   # journal even for SELECT-only usage).
   # ---------------------------------------------------------------------------
   rca-history-mcp:
-    image: "cires/mcp-rca-history:${IMAGE_TAG}"
+    image: "${MCP_RCA_HISTORY_IMAGE:-ghcr.io/linalaaraich/mcp-rca-history:${MCP_TAG:-main}}"
     container_name: ai-mcp-rca-history
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
     hostname: rca-history-mcp
     networks: [ai-stack]
     depends_on:
