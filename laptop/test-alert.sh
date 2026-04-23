@@ -59,7 +59,7 @@ deadline=$(( $(date +%s) + 900 ))
 while (( $(date +%s) < deadline )); do
   sleep 10
   resp=$(curl -sS "${TARGET}/decisions?alert_name=${ALERT_NAME}&limit=1" || true)
-  if echo "${resp}" | grep -q '"decision"'; then
+  if echo "${resp}" | grep -q '"triage_decision"'; then
     echo
     echo "=========================  VERDICT  ========================="
     echo "${resp}" | python3 -m json.tool
