@@ -147,6 +147,11 @@ services:
     container_name: ai-triage-service
     hostname: triage-service
     networks: [ai-stack]
+    labels:
+      # Tells Watchtower to auto-pull + restart this container when a
+      # new image is pushed to GHCR. See the `watchtower` service at
+      # the bottom of this file for the polling loop (60 s default).
+      com.centurylinklabs.watchtower.enable: "true"
     ports:
       - "8090:8090"
     volumes:
@@ -343,6 +348,40 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
+
+  # ---------------------------------------------------------------------------
+  # Watchtower — auto-pull + restart any container labeled
+  # com.centurylinklabs.watchtower.enable=true whenever the image tag
+  # it's pinned to points at a new digest on GHCR. This is the laptop's
+  # continuous-deployment loop: merge to main → CI builds → Watchtower
+  # redeploys within ~60s. No more manual `docker compose pull && up -d`.
+  #
+  # Free, open source (Apache 2.0). ~20 MB image. Polls GHCR every 60s.
+  # Only updates LABELED containers, so it never touches Ollama / MCP
+  # servers / anything else we want to pin until their own CI lands.
+  # Add the label to a service when its build-push workflow ships.
+  #
+  # Trade-off: watchtower needs access to /var/run/docker.sock, which
+  # is root-equivalent on the host. Acceptable on a trusted single-
+  # tenant laptop; would NOT be OK in multi-tenant prod.
+  # ---------------------------------------------------------------------------
+  watchtower:
+    image: containrrr/watchtower:1.7.1
+    container_name: ai-watchtower
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      WATCHTOWER_POLL_INTERVAL: "60"         # seconds between registry checks
+      WATCHTOWER_LABEL_ENABLE: "true"         # only update labeled containers
+      WATCHTOWER_CLEANUP: "true"              # remove old images after update
+      WATCHTOWER_ROLLING_RESTART: "true"      # update one container at a time
+      WATCHTOWER_INCLUDE_RESTARTING: "true"
     logging:
       driver: json-file
       options:
