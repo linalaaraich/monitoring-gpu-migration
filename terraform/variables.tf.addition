@@ -1,0 +1,23 @@
+# =============================================================================
+# STAGED ADDITION — append to /root/provisioning-monitoring-infra/variables.tf
+# =============================================================================
+# Why a separate variable:
+#   The existing `ubuntu_ami_id` pins Ubuntu 22.04 for monitoring + k3s. The
+#   GPU box needs a different AMI (AWS Deep Learning Base OSS Nvidia Driver
+#   for Ubuntu 22.04) so NVIDIA drivers, Docker, and the NVIDIA container
+#   toolkit come pre-installed — saves ~1 hour of bootstrap per fresh VM
+#   and eliminates driver/kernel version drift as a failure mode.
+#
+#   Using the same "pinned, required, no default" pattern as `ubuntu_ami_id`
+#   means re-applies never silently upgrade the GPU OS/driver stack.
+# =============================================================================
+
+variable "gpu_ami_id" {
+  description = "Pinned AMI ID for the GPU VM (AWS Deep Learning Base OSS Nvidia Driver GPU AMI, Ubuntu 22.04). Required — no default, to prevent silent AMI drift between terraform applies. Find the current ID at https://docs.aws.amazon.com/dlami/latest/devguide/find-dlami.html or via `aws ec2 describe-images --owners amazon --filters 'Name=name,Values=Deep Learning Base OSS Nvidia Driver GPU AMI (Ubuntu 22.04)*' --query 'sort_by(Images, &CreationDate)[-1].[ImageId,Name]' --region us-east-1`."
+  type        = string
+
+  validation {
+    condition     = can(regex("^ami-[0-9a-f]{8,17}$", var.gpu_ami_id))
+    error_message = "gpu_ami_id must be a valid AMI ID of the form ami-xxxxxxxx."
+  }
+}

@@ -1,0 +1,59 @@
+# =============================================================================
+# STAGED PATCH — targets
+#   /root/monitoring-project/roles/grafana/templates/contactpoints.yml.j2
+#
+# The only change is the webhook URL for the triage contact point: it was
+# pointing at the in-cluster NodePort service on the k3s VM; now it points
+# at the triage service running under docker-compose on the GPU VM, on
+# port 8090 directly (no NodePort layer).
+#
+# APPLY METHOD:
+#   1. Add `ai_gpu_vm_ip` to inventory/group_vars/monitoring.yml with the
+#      value of aws_eip.gpu (after terraform apply).
+#   2. Apply the diff below to contactpoints.yml.j2.
+#   3. Re-run monitoring playbook:
+#        ansible-playbook playbooks/monitoring.yml --tags grafana
+#   4. Verify in Grafana UI → Alerting → Contact points that the URL is
+#      now http://<gpu-eip>:8090/webhook/grafana.
+#
+# WHY A SEPARATE `ai_gpu_vm_ip` VAR (vs. reusing the inventory's `gpu-vm`
+# host fact): the monitoring playbook may run against only the monitoring
+# host group, so facts on the `ai` group aren't guaranteed. Using a
+# group_vars scalar is cleaner than forcing a cross-group `hostvars`
+# lookup in the Jinja template.
+# =============================================================================
+
+# ---- BEFORE -----------------------------------------------------------------
+# (first matching hunk in contactpoints.yml.j2; retained verbatim so the
+# patch is an exact string replace, not a fuzzy merge)
+#
+#       - orgId: 1
+#         name: triage-service-webhook
+#         type: webhook
+#         settings:
+#           url: http://{{ k3s_node_ip }}:30080/triage/webhook/grafana
+#           httpMethod: POST
+#
+# ---- AFTER ------------------------------------------------------------------
+#       - orgId: 1
+#         name: triage-service-webhook
+#         type: webhook
+#         settings:
+#           url: http://{{ ai_gpu_vm_ip }}:8090/webhook/grafana
+#           httpMethod: POST
+#
+# Notes:
+#   - Path changed: /triage/webhook/grafana (NodePort-prefixed) → /webhook/grafana
+#     (direct triage mount). This matches the path registered in
+#     monitoring-triage-service/app/main.py (see also the runtime contract
+#     from the 2026-04-23 research pass).
+#   - Port changed: 30080 → 8090. The GPU box runs triage natively on 8090
+#     (sg-gpu permits 8090 from sg-monitoring).
+#
+# ---- ALSO ADD (inventory/group_vars/monitoring.yml) -------------------------
+# ai_gpu_vm_ip: "{{ <EIP from terraform output>.<gpu-eip> }}"
+#
+# You can read it directly from terraform output after apply:
+#   cd /root/provisioning-monitoring-infra
+#   terraform output -raw gpu_eip          # assumes the output exists;
+#                                          # add one in outputs.tf if not

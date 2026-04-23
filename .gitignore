@@ -1,0 +1,40 @@
+# Real env files (only .env.example and .env.laptop are tracked)
+.env
+compose/.env
+laptop/.env
+
+# Terraform artifacts — this repo only holds the staged drafts, not state
+*.tfstate
+*.tfstate.*
+*.tfplan
+plan.out
+.terraform/
+.terraform.lock.hcl
+
+# Ansible vault / inventory artifacts (should never land here)
+*.vault
+.vault_pass*
+inventory/group_vars/**/vault.yml
+
+# Python / tooling
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+
+# OS
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Local benchmark output
+bench-*/
+
+# Backup files
+*.bak
+*.orig
+*~

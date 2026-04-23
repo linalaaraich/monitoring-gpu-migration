@@ -1,0 +1,56 @@
+# =============================================================================
+# STAGED PATCH — replaces the `aws_instance "gpu"` block in
+# /root/provisioning-monitoring-infra/ec2.tf.
+#
+# Everything else in ec2.tf stays untouched (monitoring, k3s, EIPs, EIP
+# associations — all unchanged).
+#
+# Why this change (and only this change):
+#   - We need a different AMI for the GPU box (DLAMI, not generic Ubuntu) so
+#     NVIDIA drivers, Docker, and the container toolkit come pre-installed.
+#   - EVERYTHING else the other two instances get (user_data that creates
+#     the `deploy` user + installs python3) works identically on the DLAMI,
+#     since it's still Ubuntu 22.04 under the hood. Reusing `local.user_data`
+#     means:
+#       (a) no user_data diff on the existing monitoring/k3s instances,
+#           which would force their recreation (user_data change is NOT
+#           in-place-updatable for EC2 instances in Terraform);
+#       (b) the deploy user + SSH key flow is identical across all three
+#           VMs, so Ansible picks it up without any special-case logic.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# GPU VM — g5.xlarge (NVIDIA A10G 24GB VRAM), 100 GB gp3
+# Instance type, volume size, and AMI are all driven from variables so tfvars
+# is the single knob for any change.
+# -----------------------------------------------------------------------------
+resource "aws_instance" "gpu" {
+  count                  = var.enable_gpu ? 1 : 0
+  ami                    = var.gpu_ami_id               # CHANGED — was `local.ami_id`
+  instance_type          = var.gpu_instance_type
+  key_name               = aws_key_pair.ansible.key_name
+  subnet_id              = aws_subnet.public.id
+  vpc_security_group_ids = [aws_security_group.gpu.id]
+  user_data              = local.user_data
+
+  root_block_device {
+    volume_size = var.gpu_volume_size
+    volume_type = "gp3"
+  }
+
+  tags = { Name = "${var.project_name}-gpu" }
+
+  # Explicit: we do NOT want user_data changes to force instance replacement.
+  # The DLAMI + tfvars-pinned AMI already gives us stability; if we ever
+  # legitimately need to evolve user_data, the operator can re-create the
+  # box manually with a state `taint` rather than a silent rebuild.
+  lifecycle {
+    ignore_changes = [user_data]
+  }
+}
+
+resource "aws_eip_association" "gpu" {
+  count         = var.enable_gpu ? 1 : 0
+  instance_id   = aws_instance.gpu[0].id
+  allocation_id = aws_eip.gpu[0].id
+}

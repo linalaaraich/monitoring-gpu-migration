@@ -1,0 +1,68 @@
+# Generated 2026-04-23 — CIRES observability platform, demo env
+# Staged over the 2026-04-21 baseline to enable the GPU migration (off-k3s AI).
+# Safe to re-generate; the real file is gitignored.
+#
+# ROLLOUT SEQUENCING:
+#   Phase 1 (today, as soon as quota clears):
+#     Everything below applies as-is. k3s stays at t3.xlarge so the AI stack
+#     there is undisturbed until we've validated the GPU box.
+#   Phase 2 (after AI is running on the GPU box, Grafana webhook repointed,
+#   and helm uninstall of ai-stack is complete):
+#     Change `k3s_instance_type` to "t3.large". This triggers an in-place
+#     EC2 modify (stop/start, ~2 min downtime), EBS + EIP preserved.
+#     Do NOT combine with Phase 1 — don't downsize k3s until the AI has
+#     actually moved off it.
+
+aws_region  = "us-east-1"
+environment = "demo"
+
+# Pinned Ubuntu 22.04 LTS AMI (us-east-1, Canonical 2026-04-10) — unchanged
+ubuntu_ami_id = "ami-05e86b3611c60b0b4"
+
+# NEW: Pinned AWS Deep Learning Base OSS Nvidia Driver AMI (Ubuntu 22.04, us-east-1).
+# **TODO BEFORE APPLY:** look up the current ID with the command in NOTES.md
+# and paste it here. Value below is a PLACEHOLDER — tf plan will fail the
+# regex validation until a real AMI ID is in place (intentional guard).
+gpu_ami_id = "ami-PLACEHOLDER_REPLACE_ME"
+
+# SSH CIDRs — unchanged from 2026-04-22 demo rescope
+allowed_ssh_cidrs = ["0.0.0.0/0"]
+
+# SSH key — unchanged
+ssh_public_key_path = "~/.ssh/ansible_key.pub"
+ssh_key_name        = "ansible-key"
+
+# RDS creds — unchanged (rotate separately in Phase 2+).
+# REAL PASSWORD LIVES IN THE NON-STAGED terraform.tfvars ON THE CONTROLLER.
+# Copy the existing `db_password = "..."` line from
+# /root/provisioning-monitoring-infra/terraform.tfvars before `terraform apply`.
+db_username = "appuser"
+db_password = "REPLACE_WITH_CURRENT_db_password_FROM_EXISTING_TFVARS"
+
+# S3 bucket — unchanged
+s3_bucket_name = "cires-observability-demo-629742"
+
+# --- Instance sizing -----------------------------------------------------
+#   monitoring: t3.large  (unchanged — default)
+#   k3s:        t3.xlarge (Phase 1 unchanged; Phase 2 → "t3.large")
+#   gpu:       g5.xlarge  (NEW — NVIDIA A10G 24 GB VRAM)
+#
+# Explicitly setting all three so a future tfvars edit doesn't
+# accidentally revert to the variables.tf defaults.
+monitoring_instance_type = "t3.large"
+k3s_instance_type        = "t3.xlarge"   # Phase 2: change to "t3.large"
+gpu_instance_type        = "g5.xlarge"
+
+monitoring_volume_size = 50
+k3s_volume_size        = 50
+gpu_volume_size        = 100             # qwen2.5:14b Q4 (~9GB) + images + logs + headroom
+
+# --- Staged deploy flags (quota-aware) -----------------------------------
+# Standard on-demand vCPU quota: 8 (sufficient for monitoring + k3s).
+# G+VT quota: requested increase to 8 vCPU on 2026-04-23 (RequestId
+# 5eb7f81a4c3346d9bbba4e90cf41b72cOQHLSxux). DO NOT flip `enable_gpu=true`
+# until the request shows APPROVED — otherwise `terraform apply` will fail
+# at the RunInstances call with VcpuLimitExceeded.
+enable_k3s        = true
+enable_gpu        = true   # changed from false — gated by quota approval
+enable_cloudfront = false

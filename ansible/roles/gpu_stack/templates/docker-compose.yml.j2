@@ -1,0 +1,349 @@
+# MANAGED BY ANSIBLE — DO NOT EDIT BY HAND
+# Rendered from roles/ai_stack_compose/templates/docker-compose.yml.j2.
+# Keep in sync with the staged reference at
+#   /root/gpu-migration-staging/compose/docker-compose.yml
+# =============================================================================
+# CIRES AI stack — docker-compose runtime for the dedicated GPU EC2 box.
+#
+# This file is the ground truth for what runs on the GPU instance. It is
+# authored to match the EXACT runtime contract discovered from the existing
+# Helm chart + triage config.py + MCP source — no guesswork, no drift.
+#
+# Pair this file with:
+#   - .env        (SMTP creds, MONITORING_VM_IP, image tag)  — produced by
+#                 the Ansible role from group_vars/vault on the GPU box
+#   - drain3.ini  (bind-mounted into triage at /etc/drain3/drain3.ini)
+#
+# Service names here match the default URLs in triage/app/config.py so no
+# env overrides are needed beyond the SMTP/monitoring vars. Container
+# hostnames are set explicitly for DNS stability.
+# =============================================================================
+
+name: ai-stack
+
+networks:
+  ai-stack:
+    driver: bridge
+    name: ai-stack
+
+volumes:
+  # Shared, read-write volume used by triage, rca-history-mcp, and drain3-mcp.
+  # Hosts:
+  #   /data/rca_history.db        — SQLite RCA history (triage writes, rca-history-mcp reads)
+  #   /data/drain3_state/         — Drain3 persisted state + snapshots
+  # SQLite requires RW even on a "read-only" consumer (opening a DB file
+  # needs write access for the rollback journal).
+  triage_data:
+    name: ai-stack_triage_data
+
+  # Ollama model weights + manifests. 14B Q4 model is ~9 GB; keep this
+  # separate from triage_data so we can drop models without touching state.
+  ollama_data:
+    name: ai-stack_ollama_data
+
+
+# =============================================================================
+# SERVICES
+# =============================================================================
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # Ollama — GPU-backed LLM inference server.
+  # Exposed on 11434 to the VPC (sg-gpu rule opens 11434 from vpc_cidr).
+  # Single model loaded (MAX_LOADED_MODELS=1), kept resident for 6h
+  # between calls (KEEP_ALIVE=6h) to avoid cold-start on sparse traffic.
+  # ---------------------------------------------------------------------------
+  ollama:
+    image: ollama/ollama:0.5.7
+    container_name: ai-ollama
+    hostname: ollama
+    networks: [ai-stack]
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    environment:
+      OLLAMA_HOST: "0.0.0.0:11434"
+      OLLAMA_KEEP_ALIVE: "6h"
+      OLLAMA_NUM_PARALLEL: "1"
+      OLLAMA_MAX_LOADED_MODELS: "1"
+      # Belt-and-suspenders with the deploy.resources NVIDIA reservation below.
+      NVIDIA_VISIBLE_DEVICES: "all"
+      NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    # "ollama list" exits 0 once the server is accepting requests. We do NOT
+    # require a specific model to be present — that's what ollama-init does.
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 15s
+      timeout: 10s
+      retries: 6
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  # ---------------------------------------------------------------------------
+  # ollama-init — one-shot sidecar that pulls the model once Ollama is up,
+  # then exits 0. Triage depends_on its successful completion, so triage
+  # never calls a model that isn't pulled.
+  #
+  # Idempotent: `ollama pull` on an already-present model is a ~1s no-op.
+  # ---------------------------------------------------------------------------
+  ollama-init:
+    image: ollama/ollama:0.5.7
+    container_name: ai-ollama-init
+    networks: [ai-stack]
+    depends_on:
+      ollama:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        export OLLAMA_HOST="ollama:11434"
+        echo "[ollama-init] pulling model ${OLLAMA_MODEL}..."
+        ollama pull "${OLLAMA_MODEL}"
+        echo "[ollama-init] verifying model is loadable..."
+        ollama show "${OLLAMA_MODEL}" >/dev/null
+        echo "[ollama-init] done"
+    environment:
+      OLLAMA_MODEL: "${OLLAMA_MODEL:?OLLAMA_MODEL must be set in .env}"
+    restart: "no"
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+  # ---------------------------------------------------------------------------
+  # Triage service — the orchestrator. Reads alerts from Grafana webhooks,
+  # fans out to MCPs for context, calls Ollama for verdicts, writes to
+  # rca_history.db, emails on escalate. Also runs the Drain3 background
+  # ingestion loop against LOKI_API_URL.
+  #
+  # Startup order:
+  #   ollama (healthy) → ollama-init (exited 0) → MCPs (healthy, except the
+  #   two that depend on triage itself: drain3-mcp and rca-history-mcp —
+  #   those start AFTER triage is healthy; see their own depends_on below).
+  #
+  # Notably we do NOT depends_on prometheus/loki/jaeger MCPs at startup —
+  # triage doesn't call them until an alert arrives, and each call has
+  # retry + fallback. This avoids a cold-start deadlock.
+  # ---------------------------------------------------------------------------
+  triage-service:
+    image: "cires/triage-service:${IMAGE_TAG:?IMAGE_TAG must be set in .env}"
+    container_name: ai-triage-service
+    hostname: triage-service
+    networks: [ai-stack]
+    ports:
+      - "8090:8090"
+    volumes:
+      - triage_data:/data
+      - ./drain3.ini:/etc/drain3/drain3.ini:ro
+    depends_on:
+      ollama:
+        condition: service_healthy
+      ollama-init:
+        condition: service_completed_successfully
+    env_file:
+      - ./.env
+    environment:
+      # --- Ollama ---
+      OLLAMA_URL: "http://ollama:11434"
+      OLLAMA_MODEL: "${OLLAMA_MODEL}"
+      # GPU-tier timeouts. CPU used 1800/2400; on GPU we target ~30s per
+      # call so 300/900 is generous headroom.
+      OLLAMA_REQUEST_TIMEOUT: "300"
+      PIPELINE_TIMEOUT: "900"
+      CIRCUIT_BREAKER_FAILURE_THRESHOLD: "5"
+      CIRCUIT_BREAKER_COOLDOWN_SECONDS: "60"
+
+      # --- MCP bridges (compose-DNS) ---
+      PROMETHEUS_MCP_URL: "http://prometheus-mcp:8091"
+      LOKI_MCP_URL: "http://loki-mcp:8092"
+      JAEGER_MCP_URL: "http://jaeger-mcp:8093"
+      DRAIN3_MCP_URL: "http://drain3-mcp:8094"
+      RCA_HISTORY_MCP_URL: "http://rca-history-mcp:8095"
+
+      # --- Direct Loki (used ONLY for the Drain3 background ingestion
+      #     loop — bypasses the MCP because it's bulk, not a tool call) ---
+      LOKI_API_URL: "http://${MONITORING_VM_IP:?MONITORING_VM_IP must be set in .env}:3100"
+
+      # --- Email links + dashboard ---
+      GRAFANA_DASHBOARD_URL: "http://${MONITORING_VM_IP}:3000"
+
+      # --- Evidence bundle sizing (matches 2026-04-22 Helm values for
+      #     continuity — adjust per §4 benchmark findings) ---
+      PROMETHEUS_RANGE_MINUTES: "10"
+      LOKI_LOG_LIMIT: "50"
+      JAEGER_TRACE_LIMIT: "10"
+
+      # --- Drain3 ---
+      DRAIN3_STATE_DIR: "/data/drain3_state"
+      DRAIN3_POLL_INTERVAL: "30"
+      DRAIN3_ANOMALY_THRESHOLD: "5"
+
+      # --- RCA store + suppression (Layer 2) ---
+      RCA_DB_PATH: "/data/rca_history.db"
+      TRIAGE_SUPPRESSION_ENABLED: "true"
+      TRIAGE_HISTORY_LOOKBACK_MINUTES: "15"
+      DEDUP_WINDOW_SECONDS: "300"
+
+      # --- Context gather timeout (pillar fan-out budget) ---
+      CONTEXT_TIMEOUT: "8"
+
+      # SMTP_* + NOTIFICATION_EMAIL come from env_file (./.env).
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8090/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  # ---------------------------------------------------------------------------
+  # MCP: Prometheus. Stateless HTTP → Prometheus HTTP proxy.
+  # Not exposed to host — only reachable from triage via the compose network.
+  # ---------------------------------------------------------------------------
+  prometheus-mcp:
+    image: "cires/mcp-prometheus:${IMAGE_TAG}"
+    container_name: ai-mcp-prometheus
+    hostname: prometheus-mcp
+    networks: [ai-stack]
+    environment:
+      PROMETHEUS_URL: "http://${MONITORING_VM_IP}:9090"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8091/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
+
+  # ---------------------------------------------------------------------------
+  # MCP: Loki. Stateless.
+  # ---------------------------------------------------------------------------
+  loki-mcp:
+    image: "cires/mcp-loki:${IMAGE_TAG}"
+    container_name: ai-mcp-loki
+    hostname: loki-mcp
+    networks: [ai-stack]
+    environment:
+      LOKI_URL: "http://${MONITORING_VM_IP}:3100"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8092/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
+
+  # ---------------------------------------------------------------------------
+  # MCP: Jaeger. Stateless.
+  # ---------------------------------------------------------------------------
+  jaeger-mcp:
+    image: "cires/mcp-jaeger:${IMAGE_TAG}"
+    container_name: ai-mcp-jaeger
+    hostname: jaeger-mcp
+    networks: [ai-stack]
+    environment:
+      JAEGER_URL: "http://${MONITORING_VM_IP}:16686"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8093/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
+
+  # ---------------------------------------------------------------------------
+  # MCP: Drain3. NOT stateless — its /health endpoint calls triage/health,
+  # so it MUST start after triage is healthy. Without the depends_on below
+  # it would stay in an unhealthy loop until triage caught up (functional,
+  # but noisy).
+  # ---------------------------------------------------------------------------
+  drain3-mcp:
+    image: "cires/mcp-drain3:${IMAGE_TAG}"
+    container_name: ai-mcp-drain3
+    hostname: drain3-mcp
+    networks: [ai-stack]
+    depends_on:
+      triage-service:
+        condition: service_healthy
+    environment:
+      TRIAGE_SERVICE_URL: "http://triage-service:8090"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8094/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
+
+  # ---------------------------------------------------------------------------
+  # MCP: RCA history. Reads rca_history.db — created by triage on first boot.
+  # SQLite's /health check (SELECT COUNT(*) FROM rca_history) requires the
+  # table to exist, so we gate this on triage's readiness.
+  # Volume mount MUST be read-write (SQLite opens the DB with a rollback
+  # journal even for SELECT-only usage).
+  # ---------------------------------------------------------------------------
+  rca-history-mcp:
+    image: "cires/mcp-rca-history:${IMAGE_TAG}"
+    container_name: ai-mcp-rca-history
+    hostname: rca-history-mcp
+    networks: [ai-stack]
+    depends_on:
+      triage-service:
+        condition: service_healthy
+    volumes:
+      - triage_data:/data
+    environment:
+      RCA_DB_PATH: "/data/rca_history.db"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8095/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"

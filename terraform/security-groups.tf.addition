@@ -1,0 +1,31 @@
+# =============================================================================
+# STAGED ADDITION — append to
+# /root/provisioning-monitoring-infra/security-groups.tf
+#
+# Adds ONE new ingress rule on sg-gpu: port 8090 from the operator's
+# allowed_ssh_cidrs, so the triage service's /dashboard decision-inbox is
+# reachable from a browser. The existing rule (8090 from sg-monitoring for
+# the Grafana webhook) stays as-is.
+#
+# Why a separate rule instead of widening the existing one:
+#   - The existing `gpu_triage_webhook` rule is SG-referenced (source =
+#     sg-monitoring). It can't be widened to also include CIDR-based sources
+#     — a single ingress rule resource accepts either
+#     `referenced_security_group_id` XOR `cidr_ipv4`, not both.
+#   - Two rules on the same port + protocol + SG are fine; AWS aggregates
+#     them into one effective allow list.
+# =============================================================================
+
+# --- Triage dashboard (operator browser, same CIDRs trusted for SSH) ---
+resource "aws_vpc_security_group_ingress_rule" "gpu_triage_dashboard" {
+  for_each = toset(var.allowed_ssh_cidrs)
+
+  security_group_id = aws_security_group.gpu.id
+  description       = "Triage decision-inbox dashboard (operator browser)"
+  from_port         = 8090
+  to_port           = 8090
+  ip_protocol       = "tcp"
+  cidr_ipv4         = each.value
+
+  tags = { Name = "${var.project_name}-gpu-triage-dashboard" }
+}

@@ -1,0 +1,114 @@
+---
+# =============================================================================
+# Role: ai_stack_compose — bring the AI stack up on the GPU box.
+#
+# Order of operations:
+#   1. Ensure deploy dirs exist (/opt/cires-ai, /opt/cires-ai/src).
+#   2. Rsync source for triage + 5 MCPs from the controller to the box.
+#   3. Render drain3.ini from the upstream repo (bind-mounted into triage).
+#   4. Render .env (SMTP creds from vault) with 0600 perms.
+#   5. Render docker-compose.yml from the template.
+#   6. Build 6 Docker images on the box (if source changed → handlers fire).
+#   7. `docker compose up -d` with forced recreate on image-tag change.
+#
+# Handlers:
+#   - `rebuild ai-stack images`: runs `docker compose build` — triggered by
+#     rsync'd source change.
+#   - `recreate ai-stack`: runs `docker compose up -d --force-recreate` —
+#     triggered by compose file or .env change.
+# =============================================================================
+
+# --- 1. Directory layout ---------------------------------------------------
+- name: Create compose project root
+  ansible.builtin.file:
+    path: "{{ ai_stack_root }}"
+    state: directory
+    owner: "{{ ai_stack_user }}"
+    group: "{{ ai_stack_user }}"
+    mode: "0750"
+
+- name: Create source root
+  ansible.builtin.file:
+    path: "{{ ai_stack_src_root }}"
+    state: directory
+    owner: "{{ ai_stack_user }}"
+    group: "{{ ai_stack_user }}"
+    mode: "0755"
+
+# --- 2. Rsync source repos -------------------------------------------------
+# Use `synchronize` (rsync) rather than `copy` so (a) unchanged files
+# don't trigger a rebuild, (b) we skip the ~/.git dirs (large, pointless).
+#
+# `rsync_opts` excludes are belt-and-suspenders on top of `rsync_timeout`.
+- name: Rsync source repos from controller → GPU box
+  ansible.posix.synchronize:
+    src: "{{ item.src }}"
+    dest: "{{ ai_stack_src_root }}/{{ item.name }}/"
+    delete: true
+    recursive: true
+    rsync_opts:
+      - "--exclude=.git"
+      - "--exclude=__pycache__"
+      - "--exclude=.pytest_cache"
+      - "--exclude=.venv"
+      - "--exclude=*.pyc"
+  loop: "{{ ai_stack_source_repos }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: rsync_result
+  notify: rebuild ai-stack images
+  tags: [build]
+
+# --- 3. drain3.ini — bind-mounted into triage ------------------------------
+- name: Copy drain3.ini into the compose root
+  ansible.builtin.copy:
+    src: "{{ ai_stack_src_root }}/monitoring-triage-service/drain3.ini"
+    dest: "{{ ai_stack_root }}/drain3.ini"
+    remote_src: true
+    owner: "{{ ai_stack_user }}"
+    group: "{{ ai_stack_user }}"
+    mode: "0644"
+  notify: recreate ai-stack
+  tags: [config]
+
+# --- 4. .env (secrets) -----------------------------------------------------
+- name: Render .env (SMTP + monitoring URL + image tag)
+  ansible.builtin.template:
+    src: env.j2
+    dest: "{{ ai_stack_root }}/.env"
+    owner: root
+    group: root
+    mode: "0600"
+    backup: false
+  no_log: true
+  notify: recreate ai-stack
+  tags: [config, secrets]
+
+# --- 5. docker-compose.yml -------------------------------------------------
+- name: Render docker-compose.yml
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: "{{ ai_stack_root }}/docker-compose.yml"
+    owner: "{{ ai_stack_user }}"
+    group: "{{ ai_stack_user }}"
+    mode: "0644"
+  notify: recreate ai-stack
+  tags: [config]
+
+# --- 6. Build images (flushes the `rebuild` handler immediately so the
+#       subsequent `up -d` uses the fresh tags) -----------------------------
+- name: Force handler flush before compose up
+  ansible.builtin.meta: flush_handlers
+  tags: [build]
+
+# --- 7. docker compose up --------------------------------------------------
+- name: docker compose up -d
+  ansible.builtin.command:
+    cmd: docker compose up -d --remove-orphans
+    chdir: "{{ ai_stack_root }}"
+  environment:
+    COMPOSE_DOCKER_CLI_BUILD: "1"
+    DOCKER_BUILDKIT: "1"
+  register: compose_up
+  changed_when: "'Started' in compose_up.stderr or 'Created' in compose_up.stderr or 'Recreated' in compose_up.stderr"
+  tags: [run]

@@ -1,0 +1,128 @@
+---
+# =============================================================================
+# gpu.yml — bootstrap the dedicated GPU EC2 instance with the AI stack
+# under docker-compose.
+#
+# Runs against host group `ai` (single host: `gpu-vm`, added to
+# inventory/production.yml after `terraform apply` creates the instance).
+#
+# Idempotent: re-running is a no-op if the stack is already healthy. Image
+# rebuilds only happen when source has changed since last sync (rsync
+# detects + re-triggers the role's build_images handler).
+#
+# Prerequisites (must hold BEFORE running):
+#   - Terraform apply has completed; GPU instance is running with Status=ok.
+#   - ~/.ssh/ansible_key reachable; gpu-vm in inventory/production.yml
+#     under `ai:` group.
+#   - group_vars/ai/vault.yml contains SMTP creds (ansible-vault encrypted).
+#   - Monitoring VM is reachable from the GPU box on 9090/3100/16686
+#     (enforced by sg-monitoring ingress rules from VPC CIDR; already in
+#     Terraform).
+#
+# Usage:
+#   cd /root/monitoring-project
+#   ansible-playbook playbooks/gpu.yml --ask-vault-pass
+#
+# To skip the image rebuild when you only want to re-render .env / compose:
+#   ansible-playbook playbooks/gpu.yml --ask-vault-pass --skip-tags build
+#
+# To force a rebuild (e.g., after pulling new source):
+#   ansible-playbook playbooks/gpu.yml --ask-vault-pass --tags build
+# =============================================================================
+
+- name: Bootstrap GPU instance — AI stack under docker-compose
+  hosts: ai
+  become: true
+  gather_facts: true
+
+  # --- Fail fast if the essential inputs are missing ---
+  pre_tasks:
+    - name: Assert required group_vars are set
+      ansible.builtin.assert:
+        that:
+          - monitoring_vm_ip is defined and monitoring_vm_ip | length > 0
+          - ollama_model is defined and ollama_model | length > 0
+          - image_tag is defined and image_tag | length > 0
+          - triage_smtp_user is defined and triage_smtp_user | length > 0
+          - triage_smtp_password is defined and triage_smtp_password | length > 0
+          - triage_notification_email is defined and triage_notification_email | length > 0
+        fail_msg: >
+          One or more required group_vars are missing. Check
+          inventory/group_vars/ai.yml and group_vars/ai/vault.yml.
+        quiet: true
+
+    - name: Verify the NVIDIA driver is present (DLAMI guarantee)
+      ansible.builtin.command: nvidia-smi
+      register: nvidia_smi
+      changed_when: false
+      failed_when: nvidia_smi.rc != 0
+
+    - name: Verify Docker is installed (DLAMI guarantee)
+      ansible.builtin.command: docker --version
+      register: docker_version
+      changed_when: false
+      failed_when: docker_version.rc != 0
+
+    - name: Verify nvidia-container-toolkit is installed (DLAMI guarantee)
+      ansible.builtin.command: nvidia-ctk --version
+      register: nvidia_ctk
+      changed_when: false
+      failed_when: nvidia_ctk.rc != 0
+
+  roles:
+    - ai_stack_compose
+
+  post_tasks:
+    - name: Wait for triage /health to return 200
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:8090/health"
+        status_code: 200
+      retries: 30
+      delay: 10
+      register: triage_health
+      until: triage_health.status == 200
+
+    - name: Wait for Ollama /api/tags to return 200 and list the target model
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:11434/api/tags"
+        return_content: true
+        status_code: 200
+      register: ollama_tags
+      retries: 20
+      delay: 15
+      until:
+        - ollama_tags.status == 200
+        - ollama_model in (ollama_tags.content | from_json | json_query('models[*].name') | join(','))
+
+    - name: Probe each MCP /health in turn
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ item.port }}/health"
+        status_code: 200
+      loop:
+        - { name: prometheus-mcp,  port: 8091 }
+        - { name: loki-mcp,        port: 8092 }
+        - { name: jaeger-mcp,      port: 8093 }
+        - { name: drain3-mcp,      port: 8094 }
+        - { name: rca-history-mcp, port: 8095 }
+      loop_control:
+        label: "{{ item.name }}"
+      retries: 20
+      delay: 10
+      register: mcp_health
+      until: mcp_health.status == 200
+
+    - name: Summary
+      ansible.builtin.debug:
+        msg:
+          - "AI stack is up on {{ inventory_hostname }}."
+          - "  Triage:     http://{{ ansible_host }}:8090"
+          - "  Dashboard:  http://{{ ansible_host }}:8090/dashboard"
+          - "  Ollama:     http://{{ ansible_host }}:11434  (model: {{ ollama_model }})"
+          - "  Logs:       ssh deploy@{{ ansible_host }} 'cd /opt/cires-ai && docker compose logs -f --tail=100 SERVICE'"
+          - ""
+          - "NEXT STEPS (not done by this playbook):"
+          - "  1. helm uninstall ai-stack -n ai    # free resources on k3s"
+          - "  2. ansible-playbook playbooks/monitoring.yml --tags grafana"
+          - "     (after updating monitoring_webhook_url to the GPU EIP)"
+          - "  3. Fire a test alert via Grafana's 'Test' button; confirm a"
+          - "     decision lands at /decisions within ~60s p95."

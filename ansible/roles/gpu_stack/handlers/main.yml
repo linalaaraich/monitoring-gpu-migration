@@ -1,0 +1,33 @@
+---
+# =============================================================================
+# Handlers for ai_stack_compose. Notified from tasks/main.yml.
+# =============================================================================
+
+- name: rebuild ai-stack images
+  ansible.builtin.command:
+    cmd: >
+      docker build
+      -t {{ item.1.tag_name }}:{{ image_tag }}
+      -t {{ item.1.tag_name }}:latest
+      -f {{ ai_stack_src_root }}/{{ item.0.name }}/{{ item.1.dockerfile }}
+      {{ ai_stack_src_root }}/{{ item.0.name }}
+  environment:
+    DOCKER_BUILDKIT: "1"
+  loop: "{{ ai_stack_source_repos | subelements('images') }}"
+  loop_control:
+    label: "{{ item.1.tag_name }}:{{ image_tag }}"
+  changed_when: true
+  listen: rebuild ai-stack images
+
+# Forces the compose stack to pick up new tags / env / compose file.
+# --force-recreate brings containers down + up even if configs look
+# unchanged at the Docker-daemon level (handles template no-op edits).
+- name: recreate ai-stack
+  ansible.builtin.command:
+    cmd: docker compose up -d --force-recreate --remove-orphans
+    chdir: "{{ ai_stack_root }}"
+  environment:
+    COMPOSE_DOCKER_CLI_BUILD: "1"
+    DOCKER_BUILDKIT: "1"
+  changed_when: true
+  listen: recreate ai-stack

@@ -1,0 +1,52 @@
+---
+# =============================================================================
+# Defaults for role `ai_stack_compose` (the GPU-box AI stack under
+# docker-compose).
+#
+# Override in:
+#   - inventory/group_vars/ai.yml    (non-secret, committed)
+#   - inventory/group_vars/ai/vault.yml  (secrets — SMTP creds — encrypted)
+# =============================================================================
+
+# --- Deployment root on the GPU box -----------------------------------------
+ai_stack_root: /opt/cires-ai                 # compose project lives here
+ai_stack_src_root: /opt/cires-ai/src          # rsync target for source repos
+ai_stack_user: deploy                         # owns the compose project
+
+# --- Image tag (shared across triage + 5 MCPs) ------------------------------
+# Bump when you want a fresh build. Date-based matches k3s-era convention.
+image_tag: "2026-04-23"
+
+# --- Source repos to rsync from the controller (must be cloned already) -----
+# Ansible controller is /root/, where the repos live per reference_cires_repos.
+ai_stack_source_repos:
+  - name: monitoring-triage-service
+    src: /root/monitoring-triage-service/
+    images:
+      - { tag_name: "cires/triage-service", dockerfile: "Dockerfile" }
+  - name: monitoring-mcp-servers
+    src: /root/monitoring-mcp-servers/
+    images:
+      - { tag_name: "cires/mcp-prometheus",  dockerfile: "prometheus_mcp/Dockerfile" }
+      - { tag_name: "cires/mcp-loki",        dockerfile: "loki_mcp/Dockerfile" }
+      - { tag_name: "cires/mcp-jaeger",      dockerfile: "jaeger_mcp/Dockerfile" }
+      - { tag_name: "cires/mcp-drain3",      dockerfile: "drain3_mcp/Dockerfile" }
+      - { tag_name: "cires/mcp-rca-history", dockerfile: "rca_history_mcp/Dockerfile" }
+
+# --- Model + runtime -------------------------------------------------------
+ollama_model: "qwen2.5:14b"                   # 14b-instruct-q4_K_M
+
+# --- Networking ------------------------------------------------------------
+# Monitoring VM reachable over the VPC. Can be the EIP (52.202.21.192) or
+# the private IP — both route correctly via VPC-internal paths.
+# Set in group_vars/ai.yml; default here is a clear sentinel so a missing
+# value fails loud.
+monitoring_vm_ip: ""
+
+# --- SMTP (override in vault) ----------------------------------------------
+triage_smtp_host: smtp.gmail.com
+triage_smtp_port: 587
+triage_smtp_user: ""                          # MUST OVERRIDE
+triage_smtp_password: ""                      # MUST OVERRIDE (vault)
+triage_smtp_from: ""                          # MUST OVERRIDE
+triage_notification_email: ""                 # MUST OVERRIDE

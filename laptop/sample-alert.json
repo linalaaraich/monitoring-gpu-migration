@@ -1,0 +1,34 @@
+{
+  "receiver": "triage-service-webhook",
+  "status": "firing",
+  "alerts": [
+    {
+      "status": "firing",
+      "labels": {
+        "alertname": "LaptopSmokeTest_BackendHigh5xxRate",
+        "severity": "critical",
+        "service": "spring-boot-app",
+        "k8s_namespace_name": "default",
+        "k8s_pod_name": "spring-boot-test-pod"
+      },
+      "annotations": {
+        "summary": "Laptop integration smoke test — synthetic 5xx surge",
+        "description": "This alert was injected manually via curl to validate the AI-stack pipeline end-to-end on a laptop GPU. Expected behavior: triage fans out to the 5 MCPs (some may return errors if monitoring VM is unreachable), Ollama (qwen2.5:7b) produces a structured verdict, decision lands in the SQLite store at /data/rca_history.db, visible at http://localhost:8090/dashboard and via GET /decisions."
+      },
+      "startsAt": "PLACEHOLDER_STARTS_AT",
+      "endsAt": "0001-01-01T00:00:00Z",
+      "generatorURL": "http://localhost:3000/synthetic",
+      "fingerprint": "laptop-smoke-test"
+    }
+  ],
+  "groupLabels": {
+    "alertname": "LaptopSmokeTest_BackendHigh5xxRate"
+  },
+  "commonLabels": {
+    "severity": "critical",
+    "service": "spring-boot-app"
+  },
+  "externalURL": "http://localhost:3000",
+  "version": "4",
+  "groupKey": "laptop-smoke-test"
+}
