@@ -28,58 +28,65 @@ nvidia-smi
 If `wsl --version` says WSL1 or errors: run `wsl --install` in PowerShell
 (admin), reboot, then continue.
 
-### A2. Install Ubuntu 22.04 under WSL2 (if not already present)
+### A2. Install Ubuntu under WSL2 (if not already present)
 
 ```powershell
 wsl --list --verbose
 ```
 
-- If a distro already shows up with `VERSION 2` and NAME `Ubuntu-22.04`,
-  skip to A3.
+- If a distro already shows up with `VERSION 2` (any recent Ubuntu LTS —
+  22.04 or 24.04 both work; the rest of this guide uses `Ubuntu` as the
+  distro name), skip to A3.
 - Otherwise:
   ```powershell
-  wsl --install -d Ubuntu-22.04
+  wsl --install -d Ubuntu
   ```
   It will prompt you to create a UNIX username + password on first boot.
   Write them down — you'll use `sudo` inside WSL2 a lot.
 
+> If your distro is named differently (e.g. `Ubuntu-22.04`), substitute
+> that name in every `wsl -d Ubuntu ...` command below.
+
 ### A3. Confirm GPU passthrough into WSL2
 
-Still in PowerShell (or inside the Ubuntu shell):
+Two tests — one quick sanity check, one authoritative. Run in PowerShell:
 
-```bash
-wsl -d Ubuntu-22.04 -- nvidia-smi
+```powershell
+wsl -d Ubuntu -e nvidia-smi
 ```
 
-If you see the 1060 listed with driver/CUDA version, **GPU passthrough
-works**. Done. Otherwise:
-
-- Update the Windows NVIDIA driver (A1 instructions).
-- Reboot.
-- Retry.
+- **If this prints the 1060 and driver info:** great, passthrough works.
+- **If it says `execvpe(nvidia-smi) failed: No such file or directory`:**
+  that's fine on a fresh Ubuntu 24.04 — the userspace `nvidia-smi` binary
+  isn't pre-installed, but the GPU is still reachable. The docker-based
+  test in A5 is authoritative.
+- **If it errors for any other reason** (e.g. "NVIDIA-SMI couldn't
+  communicate with the driver"): update the Windows NVIDIA driver from
+  https://www.nvidia.com/Download/index.aspx, reboot, retry.
 
 ### A4. Configure Docker Desktop for WSL2 + GPU
 
 Open **Docker Desktop → Settings**:
 
 1. **General** → check *Use the WSL 2 based engine*. (Default on Win11.)
-2. **Resources → WSL Integration** → toggle *Enable integration with my default WSL distro* **on**, AND explicitly toggle on `Ubuntu-22.04`.
+2. **Resources → WSL Integration** → toggle *Enable integration with my default WSL distro* **on**, AND explicitly toggle on `Ubuntu`.
 3. **Resources** → leave Memory/CPU at defaults (Docker Desktop can use up to ~50% of system memory, which is plenty).
 4. Apply & Restart Docker Desktop.
 
-### A5. Verify Docker can reach the GPU
+### A5. Verify Docker can reach the GPU — authoritative test
 
-Open the **Ubuntu-22.04** terminal (Start menu → "Ubuntu 22.04"). From there:
+Open the **Ubuntu** terminal (Start menu → "Ubuntu"), or run from
+PowerShell via `wsl -d Ubuntu`:
 
 ```bash
-# Quick smoke test — this pulls ~300 MB, one-time
 docker run --rm --gpus all nvidia/cuda:12.2.0-base-ubuntu22.04 nvidia-smi
 ```
 
-Expected: same nvidia-smi output you saw in A3, but inside a container.
-If it says `could not select device driver "" with capabilities: [[gpu]]`,
-Docker Desktop didn't pick up the WSL GPU integration — restart Docker
-Desktop and re-check A4.
+Pulls ~300 MB once, then prints the 1060 + driver info from **inside a
+container**. This is the test that matters — if it passes, Ollama will
+be able to use the GPU. If it says `could not select device driver ""
+with capabilities: [[gpu]]`, Docker Desktop didn't pick up the WSL GPU
+integration — restart Docker Desktop and re-check A4.
 
 ### A6. Install Tailscale on Windows
 
@@ -133,7 +140,7 @@ sudo tailscale up --accept-routes
 # SAME account you used on the laptop.
 ```
 
-Verify from the laptop (Ubuntu-22.04 shell):
+Verify from the laptop (Ubuntu shell):
 
 ```bash
 tailscale status | grep monitoring
@@ -166,7 +173,7 @@ Critical: clone into `~/cires-ai/`, NOT a Windows path like
 `/mnt/c/Users/.../cires-ai/`. Docker build performance over the 9P bridge
 to NTFS is ~10× slower than native ext4.
 
-From the **Ubuntu-22.04** shell:
+From the **Ubuntu** shell:
 
 ```bash
 mkdir -p ~/cires-ai && cd ~/cires-ai
@@ -174,40 +181,44 @@ mkdir -p ~/cires-ai && cd ~/cires-ai
 # Source for Docker build contexts
 git clone https://github.com/linalaaraich/monitoring-triage-service.git
 git clone https://github.com/linalaaraich/monitoring-mcp-servers.git
+
+# Staged compose, .env template, test-alert helper (this repo)
+git clone https://github.com/linalaaraich/monitoring-gpu-migration.git
 ```
 
-### C2. Copy the staged compose + env files
+### C2. Stage compose + env + test files flat in `~/cires-ai/`
 
-From the same Ubuntu shell, grab from wherever the staging folder lives
-(adjust the SCP source to the machine with `/root/gpu-migration-staging/`):
+All files live in the cloned repos above — just copy them up one level:
 
 ```bash
-# Replace <controller> with the machine holding the staging folder.
-# If you've been running `aws` from this same laptop, the files are
-# presumably local to the controller.
-scp <controller>:/root/gpu-migration-staging/compose/docker-compose.yml ~/cires-ai/
-scp <controller>:/root/gpu-migration-staging/laptop/.env.laptop ~/cires-ai/.env
-scp <controller>:/root/monitoring-triage-service/drain3.ini ~/cires-ai/
-scp <controller>:/root/gpu-migration-staging/laptop/sample-alert.json ~/cires-ai/
-scp <controller>:/root/gpu-migration-staging/laptop/test-alert.sh ~/cires-ai/
-chmod +x ~/cires-ai/test-alert.sh
+cd ~/cires-ai
+
+cp monitoring-gpu-migration/compose/docker-compose.yml ./
+cp monitoring-gpu-migration/laptop/.env.laptop         ./.env
+cp monitoring-gpu-migration/laptop/sample-alert.json   ./
+cp monitoring-gpu-migration/laptop/test-alert.sh       ./
+cp monitoring-triage-service/drain3.ini                ./
+chmod +x test-alert.sh
 ```
 
 ### C3. Fill in `.env`
 
+Only `MONITORING_VM_IP` is required for the smoke test. Replace
+`<VM_TAILSCALE_IP>` below with the `100.x.x.x` address you noted in B1
+(the one tagged `observability-rca-monitoring` in `tailscale status`):
+
 ```bash
 cd ~/cires-ai
-nano .env
+sed -i 's|MONITORING_VM_IP=.*|MONITORING_VM_IP=<VM_TAILSCALE_IP>|' .env
+grep MONITORING_VM_IP .env    # sanity check
 ```
 
-Replace:
-- `MONITORING_VM_IP=REPLACE_WITH_MONITORING_TAILSCALE_IP` → the 100.x.x.x
-  address you noted in B1.
-- SMTP fields → reuse the Gmail creds from
-  `/root/monitoring-project/inventory/group_vars/monitoring.yml`
-  (look for `smtp_*` keys). If you want to skip email for the smoke
-  test, leave the dummy REPLACE_ME values — email send will fail with
-  a log line but the pipeline still produces a verdict.
+**SMTP (optional):** the `.env` ships with `REPLACE_ME` dummies. If you
+don't care about escalate-emails during the smoke test, leave them —
+email send fails with a clear log line but the verdict pipeline still
+works end-to-end. To wire real SMTP, fill `SMTP_USER`, `SMTP_PASSWORD`,
+`SMTP_FROM`, `NOTIFICATION_EMAIL` with a Gmail app password (same one
+used by Grafana on the monitoring VM).
 
 ### C4. Build the 6 custom images
 
