@@ -163,9 +163,10 @@ services:
       OLLAMA_URL: "http://ollama:11434"
       OLLAMA_MODEL: "${OLLAMA_MODEL}"
       # GPU-tier timeouts. CPU used 1800/2400; on GPU we target ~30s per
-      # call so 300/900 is generous headroom.
-      OLLAMA_REQUEST_TIMEOUT: "300"
-      PIPELINE_TIMEOUT: "900"
+      # call but the laptop env defaults of 1800/2400 are very generous.
+      # Override via ansible role triage_laptop/defaults/main.yml.
+      OLLAMA_REQUEST_TIMEOUT: "${OLLAMA_REQUEST_TIMEOUT:-1800}"
+      PIPELINE_TIMEOUT: "${PIPELINE_TIMEOUT:-2400}"
       CIRCUIT_BREAKER_FAILURE_THRESHOLD: "5"
       CIRCUIT_BREAKER_COOLDOWN_SECONDS: "60"
 
